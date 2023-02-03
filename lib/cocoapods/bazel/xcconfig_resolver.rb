@@ -11,7 +11,8 @@ module Pod
         sub_prefix = ->(s) { s.sub(%r{\A:/}, '') }
         resolved = resolve_string_with_build_settings(value, settings: settings)
         if Pod::Target::BuildSettings::PLURAL_SETTINGS.include?(setting)
-          resolved.shellsplit.reject(&:empty?).map(&sub_prefix)
+          resolved_array = resolved.is_a?(Array) ? resolved : resolved.shellsplit
+          resolved_array.reject(&:empty?).map(&sub_prefix)
         else
           sub_prefix[resolved]
         end
@@ -31,6 +32,7 @@ module Pod
         'OTHER_CFLAGS', # serialized separately as objc_copts
         'OTHER_SWIFT_FLAGS', # serialized separately as swift_copts
         'OTHER_LDFLAGS', # serialized separately as linkopts
+        'PODS_ROOT',
         'PODS_TARGET_SRCROOT', # not needed, used to help resolve file references relative to the current package
         'SDKROOT', # not needed since the SDKROOT gets propagated via the apple configuration transition
         'SRCROOT', # not needed, used to help resolve file references relative to the current workspace

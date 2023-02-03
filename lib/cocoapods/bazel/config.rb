@@ -53,6 +53,7 @@ module Pod
         buildifier: true,
         default_xcconfigs: {}.freeze,
         build_file_doc: '',
+        build_file_patches: {}.freeze,
         features: {
           experimental_deps_debug_and_release: false
         }
@@ -114,6 +115,10 @@ module Pod
 
       def build_file_doc
         to_h[:build_file_doc]
+      end
+
+      def build_file_patches
+        to_h[:build_file_patches]
       end
     end
   end

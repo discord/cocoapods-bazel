@@ -25,6 +25,8 @@ module Pod
         end
       end
 
+      POD_HEADER_SEARCH_PATH_RE = Regexp.new("external/Headers/(Public|Private)/([^/]+)")
+
       include XCConfigResolver
 
       attr_reader :installer, :pod_target, :file_accessors, :non_library_spec, :label, :package, :default_xcconfigs, :resolved_xconfig_by_config
@@ -37,7 +39,8 @@ module Pod
         @non_library_spec = non_library_spec
         @label = (non_library_spec ? pod_target.non_library_spec_label(non_library_spec) : pod_target.label)
         @package_dir = installer.sandbox.pod_dir(pod_target.pod_name)
-        @package = installer.sandbox.pod_dir(pod_target.pod_name).relative_path_from(installer.config.installation_root).to_s
+        # @package = installer.sandbox.pod_dir(pod_target.pod_name).relative_path_from(installer.config.installation_root).to_s
+        @package = "external/#{pod_target.pod_name}"
         @default_xcconfigs = default_xcconfigs
         @resolved_xconfig_by_config = {}
         @experimental_deps_debug_and_release = experimental_deps_debug_and_release
@@ -48,9 +51,9 @@ module Pod
         if package == relative_to
           ":#{label}"
         elsif package_basename == label
-          "//#{package}"
+          "@#{package_basename}"
         else
-          "//#{package}:#{label}"
+          "@#{package_basename}//:#{label}"
         end
       end
 
@@ -74,7 +77,8 @@ module Pod
         platform = pod_target.platform.name
         case non_library_spec&.spec_type
         when nil
-          'apple_framework'
+#           'apple_framework'
+          'apple_static_library'
         when :app
           "#{platform}_application"
         when :test
@@ -101,7 +105,8 @@ module Pod
       end
 
       def product_module_name
-        name = resolved_value_by_build_setting('PRODUCT_MODULE_NAME') || resolved_value_by_build_setting('PRODUCT_NAME') ||
+        # puts pod_target.spec_consumers[0].header_dir
+        name = pod_target.spec_consumers[0].header_dir || resolved_value_by_build_setting('PRODUCT_MODULE_NAME') || resolved_value_by_build_setting('PRODUCT_NAME') ||
                if non_library_spec
                  label.tr('-', '_')
                else
@@ -158,10 +163,16 @@ module Pod
           .to_h
           .merge(
             'CONFIGURATION' => configuration.to_s.capitalize,
+            'PODS_ROOT' => 'external',
             'PODS_TARGET_SRCROOT' => ':',
+            # 'PODS_CONFIGURATION_BUILD_DIR'
             'SRCROOT' => ':',
             'SDKROOT' => '__BAZEL_XCODE_SDKROOT__'
-          )
+          ).
+          # Can't include this yet because it assumes we have stuff at //Pods/cocoapods-bazel
+          # .merge(Xcodeproj::Constants::PROJECT_DEFAULT_BUILD_SETTINGS[configuration]) { |k, v1, v2| v1 }
+          # TODO - Turn on once we can separate (Obj)C and (Obj)C++ sources
+          merge(Xcodeproj::Constants::PROJECT_DEFAULT_BUILD_SETTINGS[:all]) { |k, v1, v2| v1 }
       end
 
       def resolved_value_by_build_setting(setting, additional_settings: {}, is_label_argument: false)
@@ -180,14 +191,43 @@ module Pod
         end
       end
 
-      def pod_target_xcconfig_header_search_paths(configuration)
+      def pod_target_xcconfig_header_search_paths_and_deps(configuration)
         settings = pod_target_xcconfig(configuration: configuration).merge('PODS_TARGET_SRCROOT' => @package)
-        resolved_build_setting_value('HEADER_SEARCH_PATHS', settings: settings) || []
+        paths = resolved_build_setting_value('HEADER_SEARCH_PATHS', settings: settings) || []
+        deps_from_search_paths(paths)
       end
 
-      def pod_target_xcconfig_user_header_search_paths(configuration)
+      def pod_target_xcconfig_user_header_search_paths_and_deps(configuration)
         settings = pod_target_xcconfig(configuration: configuration).merge('PODS_TARGET_SRCROOT' => @package)
-        resolved_build_setting_value('USER_HEADER_SEARCH_PATHS', settings: settings) || []
+        paths = resolved_build_setting_value('USER_HEADER_SEARCH_PATHS', settings: settings) || []
+        deps_from_search_paths(paths)
+      end
+
+      def deps_from_search_paths(paths)
+        final_paths = []
+        deps = []
+        paths.each do |p|
+          match = p.match(POD_HEADER_SEARCH_PATH_RE)
+          if match.nil?
+            final_paths << p
+          else
+            other_pod_name = match[2]
+            # Only include the dep if it isn't on ourself (we'll automatically add the self-deps anyway) and if it's
+            # a valid pod (sometimes these are written in the podspecs... optimistically, just in case).
+            is_valid_pod = other_pod_name != pod_target.name && installer.pod_targets.any? { |pt| pt.name == other_pod_name }
+            next unless is_valid_pod
+
+            target_suffix = case match[1]
+              when 'Public' then '_private_headers_symlinks'
+              when 'Private' then '_private_headers_symlinks'
+              else raise StandardError.new(
+                "Regex was updated without updating case statement!\np=#{p}\nmatch[1]=#{match[1]}"
+              )
+            end
+            deps << "@#{other_pod_name}//:#{other_pod_name}#{target_suffix}" if is_valid_pod
+          end
+        end
+        [final_paths, deps]
       end
 
       def pod_target_copts(type)
@@ -195,6 +235,7 @@ module Pod
           case type
           when :swift then 'OTHER_SWIFT_FLAGS'
           when :objc then 'OTHER_CFLAGS'
+          when :cc then 'OTHER_CFLAGS'
           else raise "#Unsupported type #{type}"
           end
         copts = resolved_value_by_build_setting(setting)
@@ -235,17 +276,20 @@ module Pod
           case type
           when :swift then '-Xcc'
           when :objc then nil
+          when :cc then nil
           else raise "#Unsupported type #{type}"
           end
 
         copts = []
-        pod_target_xcconfig_header_search_paths(configuration).each do |path|
+        paths, _ = pod_target_xcconfig_header_search_paths_and_deps(configuration)
+        paths.each do |path|
           iquote = "-I#{path}"
           copts << additional_flag if additional_flag
           copts << iquote
         end
 
-        pod_target_xcconfig_user_header_search_paths(configuration).each do |path|
+        paths, _ = pod_target_xcconfig_user_header_search_paths_and_deps(configuration)
+        paths.each do |path|
           iquote = "-iquote#{path}"
           copts << additional_flag if additional_flag
           copts << iquote
@@ -276,16 +320,56 @@ module Pod
         end
       end
 
+      # @param [Symbol] mappings_by_file_accessor_attr The name of the attr on the pod_target that has the
+      #   header mappings by file accessor.
+      # @param [RuleArgs] kwargs The arguments to store and deduplicate in
+      # @param [Symbol] to_store The name to store the result into
+      # @param [Array<Symbol>] to_deduplicate The names to ensure don't duplicate the keys of the generated object
+      def process_header_mappings(mappings_by_file_accessor_attr, kwargs, to_store, to_deduplicate)
+        sandbox_dir_and_input_path_pairs = pod_target.
+          # This has the shape
+          # {
+          #   file_accessor: {
+          #     sandbox_dir1,: [input_path1, input_path2, ...],
+          #     ...
+          #   },
+          #   ...
+          # }
+          # And we want [[sandbox_dir1, input_path1], [sandbox_dir1, input_path2], ...]
+          send(mappings_by_file_accessor_attr) \
+          # An iterator of {sandbox_dir: [input_path, ...], ...}, ...
+          .values \
+          # Turn it into an iterator of [sandbox_dir, [input_path, ...]], ...
+          .flat_map(&:to_a) \
+          # Turn it into an iterator of [sandbox_dir, input_path], ...
+          .flat_map { |(sandbox_dir, input_paths)| input_paths.map {|input_path| [sandbox_dir, input_path] } }
+        # Make this a mapping from input_path to where it lives in the sandbox.
+        kwargs[to_store] = sandbox_dir_and_input_path_pairs.map do |(subdir, input_path)|
+            [
+              input_path.relative_path_from(@package_dir).to_s,
+              File.join(subdir, File.basename(input_path)).to_s
+            ]
+        end.to_h
+
+        # Don't duplicate these into these other attrs
+        to_deduplicate.each do |to_dedup|
+          if kwargs.include?(to_dedup)
+            kwargs[to_dedup] = kwargs[to_dedup].difference(kwargs[to_store].keys)
+          end
+        end
+      end
+
       def to_rule_kwargs
         kwargs = RuleArgs.new do |args|
           args
             .add(:name, label)
             .add(:module_name, product_module_name, defaults: [label])
             .add(:module_map, !non_library_spec && file_accessors.map(&:module_map).find(&:itself)&.relative_path_from(@package_dir)&.to_s, defaults: [nil, false]).
-
             # public headers
-            add(:public_headers, glob(attr: :public_headers, sorted: false).yield_self { |f| case f when Array then f.reject { |path| path.include? '.framework/' } else f end }, defaults: [[]])
-            .add(:private_headers, glob(attr: :private_headers).yield_self { |f| case f when Array then f.reject { |path| path.include? '.framework/' } else f end }, defaults: [[]])
+            # .add(:public_headers, glob(attr: :public_headers, sorted: false).yield_self { |f| case f when Array then f.reject { |path| path.include? '.framework/' } else f end }, defaults: [[]])
+            # .add(:private_headers, glob(attr: :private_headers).yield_self { |f| case f when Array then f.reject { |path| path.include? '.framework/' } else f end }, defaults: [[]])
+            add(:public_headers, (file_accessors.flat_map(&:public_headers) + file_accessors.flat_map(&:project_headers)).map { |p| p.relative_path_from(@package_dir).to_s }.sort.uniq, defaults: [[]])
+            .add(:private_headers, file_accessors.flat_map(&:private_headers).map { |p| p.relative_path_from(@package_dir).to_s }.sort.uniq, defaults: [[]])
             .add(:pch, glob(attr: :prefix_header, return_files: true).first, defaults: [nil])
             .add(:data, glob(attr: :resources, exclude_directories: 0), defaults: [[]])
             .add(:resource_bundles, {}, defaults: [{}])
@@ -302,41 +386,114 @@ module Pod
           args.add(:xcconfig_by_build_setting, pod_target_xcconfig_by_build_setting, defaults: [{}])
         end.kwargs
 
-        file_accessors.group_by { |fa| fa.spec_consumer.requires_arc.class }.tap do |fa_by_arc|
-          srcs = Hash.new { |h, k| h[k] = [] }
-          non_arc_srcs = Hash.new { |h, k| h[k] = [] }
-          expand = ->(g) { expand_glob(g, extensions: %w[h hh m mm swift c cc cpp]) }
+        # if label == "React-Codegen"
+        #   file_accessors.each do |fa|
+        #     puts fa
+        #     puts 'HEADERS'
+        #     puts fa.headers
+        #     puts 'PUBILC'
+        #     puts fa.public_headers
+        #     puts 'PRIVATE'
+        #     puts fa.private_headers
+        #     puts 'PROJECT'
+        #     puts fa.project_headers
+        #     puts ':public_headers'
+        #     puts kwargs[:public_headers]
+        #     puts ':private_headers'
+        #     puts kwargs[:private_headers]
+        #   end
+        # end
 
-          Array(fa_by_arc[TrueClass]).each do |fa|
-            srcs[fa.spec_consumer.exclude_files] += fa.spec_consumer.source_files.flat_map(&expand)
-          end
-          Array(fa_by_arc[FalseClass]).each do |fa|
-            non_arc_srcs[fa.spec_consumer.exclude_files] += fa.spec_consumer.source_files.flat_map(&expand)
-          end
-          (Array(fa_by_arc[Array]) + Array(fa_by_arc[String])).each do |fa|
-            arc_globs = Array(fa.spec_consumer.requires_arc).flat_map(&expand)
-            globs = fa.spec_consumer.source_files.flat_map(&expand)
-
-            srcs[fa.spec_consumer.exclude_files] += arc_globs
-            non_arc_srcs[fa.spec_consumer.exclude_files + arc_globs] += globs
-          end
-
-          m = lambda do |h|
-            h.delete_if do |_, v|
-              v.delete_if { |g| g.include?('.framework/') }
-              v.empty?
-            end
-            return [] if h.empty?
-
-            h.map do |excludes, globs|
-              excludes = excludes.empty? ? {} : { exclude: excludes.flat_map(&method(:expand_glob)) }
-              starlark { function_call(:glob, globs.uniq, **excludes) }
-            end.reduce(&:+)
-          end
-
-          kwargs[:srcs] = m[srcs]
-          kwargs[:non_arc_srcs] = m[non_arc_srcs]
+        files_to_compiler_flags = Hash.new { [] }
+        all_headers = []
+        preserve_paths = file_accessors[0].preserve_paths
+        # if !preserve_paths.empty?
+        #   # TODO - Do this better, just don't flatten when packaging the headers
+        #   kwargs[:skip_packaging] = ["header", "modulemap"]
+        # end
+        if preserve_paths.length == 1 && File.directory?(preserve_paths[0])
+          preserve_path_root = preserve_paths[0]
+          all_headers += Dir.glob("**/*.{h,hh,hpp}", base: preserve_path_root).map { |p| preserve_path_root.join(p) }
+          # puts 'product_module_name', label, product_module_name, pod_target.product_module_name
+#           kwargs[:headermap_strip_prefix] = preserve_path_root.relative_path_from(@package_dir).to_s + "/" + (product_module_name || pod_target.product_module_name)
+        else
+          all_headers += preserve_paths.filter { |p| [".h", ".hh", ".hpp"].include?(p.extname()) }
+#           kwargs[:headermap_strip_prefix] = (product_module_name || pod_target.product_module_name)
         end
+        all_other_source_files = []
+        file_accessors.each do |file_accessor|
+          headers = file_accessor.headers
+          other_source_files = file_accessor.other_source_files
+          all_headers += headers
+          all_other_source_files += other_source_files
+
+          {
+            true => file_accessor.arc_source_files,
+            false => file_accessor.non_arc_source_files,
+          }.each do |arc, source_files|
+            source_files = (source_files - other_source_files - headers).sort.uniq
+            swift_flags = file_accessor.spec_consumer.compiler_flags.dup
+            objc_flags = swift_flags + (arc ? [] : ['-fno-objc-arc'])
+            source_files.each do |file|
+              flags = file.extname == '.swift' ? swift_flags : objc_flags
+              files_to_compiler_flags[file] += flags
+            end
+          end
+        end
+        srcs_by_copts = Hash.new { [] }
+        files_to_compiler_flags.each do |file, flags|
+          # puts "#{file} -> #{flags}" if label == "RCT-Folly"
+          # puts "    #{flags.join(' ')} -> #{file.relative_path_from(@package_dir).to_s}" if label == "RCT-Folly"
+          srcs_by_copts[flags.join(' ')] += [file.relative_path_from(@package_dir).to_s]
+        end
+        # TODO - Could make this cleaner in certain cases
+        kwargs[:srcs_by_copts] = srcs_by_copts
+        kwargs[:srcs] = (all_headers + all_other_source_files).map { |h| h.relative_path_from(@package_dir).to_s }
+
+        if !kwargs[:srcs].empty? && kwargs[:srcs_by_copts].empty?
+          kwargs[:srcs] << "@rules_cocoapods//:empty.m"
+        end
+
+        process_header_mappings(:public_header_mappings_by_file_accessor, kwargs, :public_headers_to_name, [:public_headers, :srcs])
+        process_header_mappings(:header_mappings_by_file_accessor, kwargs, :private_headers_to_name, [:private_headers, :srcs])
+        # Make sure the headers only show up in one of public or private, preferring to stay in public.
+        # kwargs[:private_headers_to_name].filter! { |k, v| !kwargs[:public_headers_to_name].include?(k) }
+
+        # file_accessors.group_by { |fa| fa.spec_consumer.requires_arc.class }.tap do |fa_by_arc|
+        #   srcs = Hash.new { |h, k| h[k] = [] }
+        #   non_arc_srcs = Hash.new { |h, k| h[k] = [] }
+        #   expand = ->(g) { expand_glob(g, extensions: %w[h hh m mm swift c cc cpp]) }
+
+        #   Array(fa_by_arc[TrueClass]).each do |fa|
+        #     srcs[fa.spec_consumer.exclude_files] += fa.spec_consumer.source_files.flat_map(&expand)
+        #   end
+        #   Array(fa_by_arc[FalseClass]).each do |fa|
+        #     non_arc_srcs[fa.spec_consumer.exclude_files] += fa.spec_consumer.source_files.flat_map(&expand)
+        #   end
+        #   (Array(fa_by_arc[Array]) + Array(fa_by_arc[String])).each do |fa|
+        #     arc_globs = Array(fa.spec_consumer.requires_arc).flat_map(&expand)
+        #     globs = fa.spec_consumer.source_files.flat_map(&expand)
+
+        #     srcs[fa.spec_consumer.exclude_files] += arc_globs
+        #     non_arc_srcs[fa.spec_consumer.exclude_files + arc_globs] += globs
+        #   end
+
+        #   m = lambda do |h|
+        #     h.delete_if do |_, v|
+        #       v.delete_if { |g| g.include?('.framework/') }
+        #       v.empty?
+        #     end
+        #     return [] if h.empty?
+
+        #     h.map do |excludes, globs|
+        #       excludes = excludes.empty? ? {} : { exclude: excludes.flat_map(&method(:expand_glob)) }
+        #       starlark { function_call(:glob, globs.uniq, **excludes) }
+        #     end.reduce(&:+)
+        #   end
+
+        #   kwargs[:srcs] = m[srcs]
+        #   kwargs[:non_arc_srcs] = m[non_arc_srcs]
+        # end
 
         file_accessors.each_with_object({}) do |fa, bundles|
           fa.spec_consumer.resource_bundles.each do |name, file_patterns|
@@ -360,6 +517,8 @@ module Pod
         if pod_target.should_build?
           kwargs[:swift_copts] = pod_target_copts(:swift)
           kwargs[:objc_copts] = pod_target_copts(:objc)
+          kwargs[:cc_copts] = pod_target_copts(:cc)
+          
           linkopts = resolved_value_by_build_setting('OTHER_LDFLAGS')
           linkopts = [linkopts] if linkopts.is_a? String
           kwargs[:linkopts] = linkopts || []
@@ -404,7 +563,13 @@ module Pod
           module_map: nil,
           srcs: [],
           non_arc_srcs: [],
+          srcs_by_copts: {},
           hdrs: [],
+          public_headers: [],
+          private_headers: [],
+          package_headers: [],
+          public_headers_to_name: {},
+          private_headers_to_name: {},
           pch: nil,
           data: [],
           resource_bundles: {},
@@ -460,10 +625,17 @@ module Pod
         debug_targets = dependent_targets_by_config[:debug]
         release_targets = dependent_targets_by_config[:release]
 
-        debug_labels = debug_targets.map { |dt| dt.bazel_label(relative_to: package) }
-        release_labels = release_targets.map { |dt| dt.bazel_label(relative_to: package) }
-        shared_labels = (debug_labels & release_labels).uniq
+        _, debug_header_search_path_deps = pod_target_xcconfig_header_search_paths_and_deps(:debug)
+        _, debug_user_header_search_path_deps = pod_target_xcconfig_user_header_search_paths_and_deps(:debug)
+        debug_target_label = debug_targets.map { |dt| dt.bazel_label(relative_to: package) }
+        debug_labels = (debug_header_search_path_deps + debug_user_header_search_path_deps + debug_target_label).sort.uniq
 
+        _, release_header_search_path_deps = pod_target_xcconfig_header_search_paths_and_deps(:release)
+        _, release_user_header_search_path_deps = pod_target_xcconfig_user_header_search_paths_and_deps(:release)
+        release_target_label = release_targets.map { |dt| dt.bazel_label(relative_to: package) }
+        release_labels = (release_header_search_path_deps + release_user_header_search_path_deps + release_target_label).sort.uniq
+
+        shared_labels = (debug_labels & release_labels).uniq
         debug_only_labels = debug_labels - shared_labels
         release_only_labels = release_labels - shared_labels
 
