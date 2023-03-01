@@ -17,7 +17,7 @@ module Pod
       end
 
       UI.titled_section 'Generating Bazel files' do
-        workspace = installer.config.installation_root
+        workspace = File.expand_path(config.workspace, installer.config.installation_root)
         sandbox = installer.sandbox
 
         # Ensure we declare the sandbox (Pods/) as a package so each Pod (as a package) belongs to sandbox root package instead
