@@ -51,9 +51,9 @@ module Pod
         if package == relative_to
           ":#{label}"
         elsif package_basename == label
-          "//#{package}"
+          "@#{package_basename}"
         else
-          "//#{package}:#{label}"
+          "@#{package_basename}//:#{label}"
         end
       end
 
