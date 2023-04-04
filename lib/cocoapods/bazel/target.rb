@@ -47,14 +47,10 @@ module Pod
       end
 
       def bazel_label(relative_to: nil)
-        package_basename = File.basename(package)
-        if package == relative_to
-          ":#{label}"
-        elsif package_basename == label
-          "@#{package_basename}"
-        else
-          "@#{package_basename}//:#{label}"
-        end
+        # NOTE(osmose): Upstream generates a label based on the basename of the directory containing this target,
+        # whereas PodToBUILD (and our monorepo build scripts) assumes @PodName//:PodLabel for all dependencies.
+        # For compatibility we're sticking with convention.
+        "@#{pod_target.pod_name}//:#{label}"
       end
 
       def build_settings_label(config)
