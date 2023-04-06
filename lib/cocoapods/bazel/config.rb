@@ -54,6 +54,7 @@ module Pod
         default_xcconfigs: {}.freeze,
         build_file_doc: '',
         workspace: '',
+        platform_overrides: {}.freeze,
         features: {
           experimental_deps_debug_and_release: false
         }
@@ -119,6 +120,10 @@ module Pod
 
       def workspace
         to_h[:workspace]
+      end
+
+      def platform_overrides
+        to_h[:platform_overrides]
       end
     end
   end
