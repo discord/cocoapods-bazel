@@ -238,11 +238,15 @@ module Pod
           end
 
         copts = []
-        pod_target_xcconfig_header_search_paths(configuration).each do |path|
-          iquote = "-I#{path}"
-          copts << additional_flag if additional_flag
-          copts << iquote
-        end
+        # NOTE(nmj): Do not add these paths, as it can cause problems with including
+        #            files that cause non-hermetic builds. This is often just
+        #            Pod/<some other pod>, which should be handled by proper deps in
+        #            the bazel file.
+        #pod_target_xcconfig_header_search_paths(configuration).each do |path|
+        #  iquote = "-I#{path}"
+        #  copts << additional_flag if additional_flag
+        #  copts << iquote
+        #end
 
         pod_target_xcconfig_user_header_search_paths(configuration).each do |path|
           iquote = "-iquote#{path}"
