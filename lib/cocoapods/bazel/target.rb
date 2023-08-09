@@ -332,7 +332,7 @@ module Pod
             return [] if h.empty?
 
             h.map do |excludes, globs|
-              excludes = excludes.empty? ? {} : { exclude: excludes.flat_map(&method(:expand_glob)) }
+              excludes = excludes.empty? ? {} : { exclude: excludes.flat_map { |e| expand_glob(e, expand_directories: true) } }
               starlark { function_call(:glob, globs.uniq, **excludes) }
             end.reduce(&:+)
           end
@@ -569,6 +569,14 @@ module Pod
       # E.g., xib files glob "*.xib" should not be expanded to "*.xib/**/*", otherise nothing will be matched
       def should_skip_directory_expansion(glob)
         extension = File.extname(glob)
+        # Sometimes a 'glob' is actually just a path. If it is not a special
+        # extension, and is a directory on disk (so that adding **/* works),
+        # then allow this dir to be expanded.
+        #
+        # A common example of this is in s.exclude_files in react packages like ReactCommon
+        if extension.empty? && File.directory?(File.join(@package_dir, glob))
+          return false
+        end
         expansion_extentions = Set['.xcassets', '.xcdatamodeld', '.lproj']
         !expansion_extentions.include?(extension)
       end
