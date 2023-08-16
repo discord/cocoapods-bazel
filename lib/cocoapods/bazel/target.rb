@@ -120,6 +120,14 @@ module Pod
         file_accessors.any? { |fa| fa.source_files.any? { |s| s.extname == '.swift' } }
       end
 
+      def uses_objcpp?
+        file_accessors.any? { |fa| fa.source_files.any? { |s| s.extname == '.mm' } }
+      end
+
+      def uses_objc?
+        file_accessors.any? { |fa| fa.source_files.any? { |s| s.extname == '.m' } }
+      end
+
       def pod_target_xcconfig_by_build_setting
         debug_xcconfig = resolved_xcconfig(configuration: :debug)
         release_xcconfig = resolved_xcconfig(configuration: :release)
@@ -161,6 +169,10 @@ module Pod
             'SRCROOT' => ':',
             'SDKROOT' => '__BAZEL_XCODE_SDKROOT__'
           )
+          # The version of bazel we use (5.4.1 at time of writing) does not handle this xcconfig in
+          # libraries that mix .mm and .m, so just drop it. We apply a uniform version in Pods.bazelrc
+          # anyways for .mm files in external/, so this is superfluous generally.
+          .delete_if { |k, v| k == 'CLANG_CXX_LANGUAGE_STANDARD' && uses_objcpp? && uses_objc? }
       end
 
       def resolved_value_by_build_setting(setting, additional_settings: {}, is_label_argument: false)
